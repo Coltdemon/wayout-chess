@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import { Chess } from "chess.js";
 import { Chessboard } from "react-chessboard";
+import { QRCodeSVG } from "qrcode.react";
 
 const API_URL =
   import.meta.env.VITE_API_URL ||
@@ -266,6 +267,33 @@ function App() {
   const [coachFeedback, setCoachFeedback] = useState(null);
 
   // =========================================================
+  // ONLINE MULTIPLAYER STATE
+  // =========================================================
+
+  const [onlineRoomId, setOnlineRoomId] = useState(null);
+  const [onlineColor, setOnlineColor] = useState(null);
+  const [onlineConnection, setOnlineConnection] =
+    useState("idle");
+  const [showRoomModal, setShowRoomModal] = useState(false);
+
+  const onlineSocketRef = useRef(null);
+  const gameRef = useRef(game);
+  const modeRef = useRef(mode);
+  const onlineColorRef = useRef(onlineColor);
+
+  useEffect(() => {
+    gameRef.current = game;
+  }, [game]);
+
+  useEffect(() => {
+    modeRef.current = mode;
+  }, [mode]);
+
+  useEffect(() => {
+    onlineColorRef.current = onlineColor;
+  }, [onlineColor]);
+
+  // =========================================================
   // PIECE SYMBOLS
   // =========================================================
 
@@ -396,7 +424,7 @@ function App() {
     setGameOver(false);
 
     if (board.inCheck()) {
-      if (mode === "ai") {
+      if (modeRef.current === "ai") {
         if (board.turn() === "w") {
           setStatus(
             "⚠️ Your king is in check!"
@@ -406,6 +434,17 @@ function App() {
             "⚠️ Black is in check!"
           );
         }
+      } else if (modeRef.current === "online") {
+        const myColorChar =
+          onlineColorRef.current === "white"
+            ? "w"
+            : "b";
+
+        setStatus(
+          board.turn() === myColorChar
+            ? "⚠️ Your king is in check!"
+            : "⚠️ Opponent is in check!"
+        );
       } else {
         const side =
           board.turn() === "w"
@@ -420,12 +459,23 @@ function App() {
       return;
     }
 
-    if (mode === "ai") {
+    if (modeRef.current === "ai") {
       if (board.turn() === "w") {
         setStatus("Your turn");
       } else {
         setStatus("Black to move");
       }
+    } else if (modeRef.current === "online") {
+      const myColorChar =
+        onlineColorRef.current === "white"
+          ? "w"
+          : "b";
+
+      setStatus(
+        board.turn() === myColorChar
+          ? "Your turn"
+          : "Opponent's turn"
+      );
     } else {
       const side =
         board.turn() === "w"
@@ -441,6 +491,8 @@ function App() {
   // =========================================================
 
   const startAIGame = async () => {
+    closeOnlineSocket();
+
     try {
       setIsThinking(true);
       setStatus("Starting new game...");
@@ -500,6 +552,8 @@ function App() {
   // =========================================================
 
   const startTwoPlayerGame = () => {
+    closeOnlineSocket();
+
     const newBoard = new Chess();
 
     setGame(newBoard);
@@ -537,10 +591,336 @@ function App() {
 
     if (mode === "ai") {
       await startAIGame();
-    } else {
+    } else if (mode === "two-player") {
       startTwoPlayerGame();
     }
   };
+
+  // =========================================================
+  // ONLINE MULTIPLAYER
+  // =========================================================
+
+  const getWebSocketUrl = (roomId) => {
+    const wsBase = API_URL.replace(
+      /^http/,
+      "ws"
+    );
+
+    return `${wsBase}/ws/room/${roomId}`;
+  };
+
+  const closeOnlineSocket = () => {
+    if (onlineSocketRef.current) {
+      onlineSocketRef.current.onclose = null;
+      onlineSocketRef.current.close();
+      onlineSocketRef.current = null;
+    }
+
+    setOnlineRoomId(null);
+    setOnlineColor(null);
+    setOnlineConnection("idle");
+    setShowRoomModal(false);
+  };
+
+  const applyIncomingOnlineMove = (
+    moveSan,
+    fen,
+    gameOverFlag
+  ) => {
+    const boardBefore = new Chess(
+      gameRef.current.fen()
+    );
+
+    const verboseMoves = boardBefore.moves({
+      verbose: true,
+    });
+
+    const matchingMove = verboseMoves.find(
+      (move) => move.san === moveSan
+    );
+
+    let capturedPiece = null;
+
+    if (matchingMove) {
+      capturedPiece = boardBefore.get(
+        matchingMove.to
+      );
+
+      if (matchingMove.flags.includes("e")) {
+        const capturedPawnSquare = `${
+          matchingMove.to[0]
+        }${
+          parseInt(matchingMove.to[1]) +
+          (matchingMove.color === "w" ? -1 : 1)
+        }`;
+
+        capturedPiece = boardBefore.get(
+          capturedPawnSquare
+        );
+      }
+    }
+
+    if (capturedPiece) {
+      const capturedColor = capturedPiece.color;
+
+      setCapturedPieces((previous) => ({
+        ...previous,
+        [capturedColor === "w"
+          ? "white"
+          : "black"]: [
+          ...previous[
+            capturedColor === "w"
+              ? "white"
+              : "black"
+          ],
+          capturedPiece.type,
+        ],
+      }));
+
+      if (matchingMove) {
+        animateCapture(
+          `${capturedColor}${capturedPiece.type.toUpperCase()}`,
+          matchingMove.from,
+          matchingMove.to
+        );
+      }
+    }
+
+    const moverColor = boardBefore.turn();
+
+    setMoveHistory((previous) => {
+      if (moverColor === "w") {
+        return [
+          ...previous,
+          {
+            moveNumber: previous.length + 1,
+            white: moveSan,
+            black: null,
+          },
+        ];
+      }
+
+      const updated = [...previous];
+      const lastIndex = updated.length - 1;
+
+      if (
+        lastIndex >= 0 &&
+        !updated[lastIndex].black
+      ) {
+        updated[lastIndex] = {
+          ...updated[lastIndex],
+          black: moveSan,
+        };
+
+        return updated;
+      }
+
+      return [
+        ...updated,
+        {
+          moveNumber: updated.length + 1,
+          white: null,
+          black: moveSan,
+        },
+      ];
+    });
+
+    const newGame = new Chess(fen);
+
+    setGame(newGame);
+    gameRef.current = newGame;
+
+    updateGameStatus(newGame);
+
+    setSelectedSquare(null);
+    setLegalMoves([]);
+
+    if (gameOverFlag) {
+      setGameOver(true);
+    }
+  };
+
+  const connectRoomSocket = (roomId) => {
+    const socket = new WebSocket(
+      getWebSocketUrl(roomId)
+    );
+
+    onlineSocketRef.current = socket;
+
+    socket.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+
+      if (data.type === "joined") {
+        setOnlineColor(data.color);
+        onlineColorRef.current = data.color;
+
+        const newGame = new Chess(data.fen);
+
+        setGame(newGame);
+        gameRef.current = newGame;
+
+        updateGameStatus(newGame);
+
+        setOnlineConnection("waiting");
+
+        return;
+      }
+
+      if (data.type === "status") {
+        const bothConnected =
+          data.white_connected &&
+          data.black_connected;
+
+        setOnlineConnection(
+          bothConnected ? "connected" : "waiting"
+        );
+
+        if (bothConnected) {
+          setShowRoomModal(false);
+        }
+
+        return;
+      }
+
+      if (data.type === "move") {
+        applyIncomingOnlineMove(
+          data.move,
+          data.fen,
+          data.game_over
+        );
+
+        return;
+      }
+
+      if (data.type === "error") {
+        setStatus(data.message);
+      }
+    };
+
+    socket.onclose = () => {
+      setOnlineConnection("idle");
+    };
+
+    socket.onerror = () => {
+      setOnlineConnection("error");
+    };
+  };
+
+  const sendOnlineMove = (moveSan) => {
+    if (
+      onlineSocketRef.current &&
+      onlineSocketRef.current.readyState ===
+        WebSocket.OPEN
+    ) {
+      onlineSocketRef.current.send(
+        JSON.stringify({
+          type: "move",
+          move: moveSan,
+        })
+      );
+    }
+  };
+
+  const resetLocalStateForOnlineGame = () => {
+    const newGame = new Chess();
+
+    setGame(newGame);
+    gameRef.current = newGame;
+    setGameId(null);
+    setMode("online");
+    modeRef.current = "online";
+
+    setSelectedSquare(null);
+    setLegalMoves([]);
+
+    setCapturedPieces({
+      white: [],
+      black: [],
+    });
+
+    setMoveHistory([]);
+    setCheckedKingSquare(null);
+    setPromotionPending(null);
+    setFlyingCapture(null);
+    setUndoStack([]);
+    setCoachFeedback(null);
+
+    setGameOver(false);
+    setIsThinking(false);
+  };
+
+  const startOnlineGame = async () => {
+    try {
+      setStatus("Creating room...");
+
+      const response = await fetch(
+        `${API_URL}/room/new`,
+        {
+          method: "POST",
+        }
+      );
+
+      const data = await response.json();
+
+      resetLocalStateForOnlineGame();
+
+      setOnlineRoomId(data.room_id);
+      setOnlineConnection("connecting");
+      setStatus("Waiting for opponent...");
+      setShowRoomModal(true);
+
+      const url = new URL(
+        window.location.href
+      );
+
+      url.searchParams.set(
+        "room",
+        data.room_id
+      );
+
+      window.history.replaceState(
+        {},
+        "",
+        url
+      );
+
+      connectRoomSocket(data.room_id);
+    } catch (error) {
+      console.error(error);
+      setStatus("Unable to create room");
+    }
+  };
+
+  const joinOnlineGame = (roomId) => {
+    resetLocalStateForOnlineGame();
+
+    setOnlineRoomId(roomId);
+    setOnlineConnection("connecting");
+    setStatus("Connecting...");
+
+    connectRoomSocket(roomId);
+  };
+
+  useEffect(() => {
+    const params = new URLSearchParams(
+      window.location.search
+    );
+
+    const roomId = params.get("room");
+
+    if (roomId) {
+      joinOnlineGame(roomId);
+    }
+
+    return () => {
+      if (onlineSocketRef.current) {
+        onlineSocketRef.current.onclose = null;
+        onlineSocketRef.current.close();
+        onlineSocketRef.current = null;
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // =========================================================
   // SQUARE CENTER
@@ -862,7 +1242,9 @@ function App() {
       return;
     }
 
-    saveUndoState();
+    if (mode !== "online") {
+      saveUndoState();
+    }
 
     // =======================================================
     // CAPTURE DETECTION
@@ -920,6 +1302,23 @@ function App() {
 
     const moveSan =
       moveResult.san;
+
+    // =======================================================
+    // ONLINE MODE
+    // =======================================================
+    //
+    // The board is only updated once the server broadcasts the
+    // authoritative move back over the WebSocket, so both
+    // players always see an identical, server-validated state.
+
+    if (mode === "online") {
+      sendOnlineMove(moveSan);
+
+      setSelectedSquare(null);
+      setLegalMoves([]);
+
+      return;
+    }
 
     // =======================================================
     // CAPTURED PIECES
@@ -1097,6 +1496,22 @@ function App() {
       return;
     }
 
+    // Online = only your assigned color, only on your turn
+    if (mode === "online") {
+      const myColorChar =
+        onlineColor === "white"
+          ? "w"
+          : "b";
+
+      if (
+        boardPiece.color !==
+          myColorChar ||
+        game.turn() !== myColorChar
+      ) {
+        return;
+      }
+    }
+
     if (
       selectedSquare ===
       square
@@ -1166,6 +1581,22 @@ function App() {
             game.turn()
         ) {
           return;
+        }
+
+        if (mode === "online") {
+          const myColorChar =
+            onlineColor === "white"
+              ? "w"
+              : "b";
+
+          if (
+            piece.color !==
+              myColorChar ||
+            game.turn() !==
+              myColorChar
+          ) {
+            return;
+          }
         }
 
         const newMoves =
@@ -1252,6 +1683,21 @@ function App() {
         game.turn()
     ) {
       return false;
+    }
+
+    if (mode === "online") {
+      const myColorChar =
+        onlineColor === "white"
+          ? "w"
+          : "b";
+
+      if (
+        piece.color !==
+          myColorChar ||
+        game.turn() !== myColorChar
+      ) {
+        return false;
+      }
     }
 
     const moves =
@@ -1796,10 +2242,7 @@ function App() {
 
             <button
               onClick={
-                restartGame
-              }
-              disabled={
-                isThinking
+                startOnlineGame
               }
               style={{
                 padding:
@@ -1809,76 +2252,113 @@ function App() {
                   8,
 
                 border:
-                  "1px solid #d1d5db",
+                  "1px solid #16a34a",
 
                 background:
-                  isThinking
-                    ? "#f3f4f6"
-                    : "white",
+                  "#16a34a",
 
                 color:
-                  isThinking
-                    ? "#9ca3af"
-                    : "#111827",
+                  "white",
 
                 cursor:
-                  isThinking
-                    ? "not-allowed"
-                    : "pointer",
+                  "pointer",
 
                 fontWeight:
                   600,
               }}
             >
-              ↻ Restart
+              Play with Friend
             </button>
 
-            <button
-              onClick={
-                undoMove
-              }
-              disabled={
-                isThinking ||
-                undoStack.length ===
-                  0
-              }
-              style={{
-                padding:
-                  "10px 16px",
+            {mode !== "online" && (
+              <button
+                onClick={
+                  restartGame
+                }
+                disabled={
+                  isThinking
+                }
+                style={{
+                  padding:
+                    "10px 16px",
 
-                borderRadius:
-                  8,
+                  borderRadius:
+                    8,
 
-                border:
-                  "1px solid #d1d5db",
+                  border:
+                    "1px solid #d1d5db",
 
-                background:
+                  background:
+                    isThinking
+                      ? "#f3f4f6"
+                      : "white",
+
+                  color:
+                    isThinking
+                      ? "#9ca3af"
+                      : "#111827",
+
+                  cursor:
+                    isThinking
+                      ? "not-allowed"
+                      : "pointer",
+
+                  fontWeight:
+                    600,
+                }}
+              >
+                ↻ Restart
+              </button>
+            )}
+
+            {mode !== "online" && (
+              <button
+                onClick={
+                  undoMove
+                }
+                disabled={
                   isThinking ||
                   undoStack.length ===
                     0
-                    ? "#f3f4f6"
-                    : "white",
+                }
+                style={{
+                  padding:
+                    "10px 16px",
 
-                color:
-                  isThinking ||
-                  undoStack.length ===
-                    0
-                    ? "#9ca3af"
-                    : "#111827",
+                  borderRadius:
+                    8,
 
-                cursor:
-                  isThinking ||
-                  undoStack.length ===
-                    0
-                    ? "not-allowed"
-                    : "pointer",
+                  border:
+                    "1px solid #d1d5db",
 
-                fontWeight:
-                  600,
-              }}
-            >
-              ↩ Undo
-            </button>
+                  background:
+                    isThinking ||
+                    undoStack.length ===
+                      0
+                      ? "#f3f4f6"
+                      : "white",
+
+                  color:
+                    isThinking ||
+                    undoStack.length ===
+                      0
+                      ? "#9ca3af"
+                      : "#111827",
+
+                  cursor:
+                    isThinking ||
+                    undoStack.length ===
+                      0
+                      ? "not-allowed"
+                      : "pointer",
+
+                  fontWeight:
+                    600,
+                }}
+              >
+                ↩ Undo
+              </button>
+            )}
           </div>
         </div>
 
@@ -2239,9 +2719,59 @@ function App() {
                 <strong>
                   {mode === "ai"
                     ? "AI vs Stockfish"
+                    : mode === "online"
+                    ? "Play with Friend (Online)"
                     : "Two Player"}
                 </strong>
               </div>
+
+              {mode === "online" &&
+                onlineColor && (
+                  <div
+                    style={{
+                      marginTop: 4,
+                      fontSize: 13,
+                      color: "#6b7280",
+                    }}
+                  >
+                    You are playing:{" "}
+                    <strong>
+                      {onlineColor ===
+                      "white"
+                        ? "White"
+                        : "Black"}
+                    </strong>
+                  </div>
+                )}
+
+              {mode === "online" &&
+                onlineRoomId &&
+                !showRoomModal && (
+                  <button
+                    onClick={() =>
+                      setShowRoomModal(
+                        true
+                      )
+                    }
+                    style={{
+                      marginTop: 10,
+                      padding:
+                        "6px 12px",
+                      borderRadius: 6,
+                      border:
+                        "1px solid #d1d5db",
+                      background:
+                        "white",
+                      color: "#111827",
+                      cursor:
+                        "pointer",
+                      fontSize: 13,
+                      fontWeight: 600,
+                    }}
+                  >
+                    Show room QR code
+                  </button>
+                )}
             </div>
 
             {/* AI COACH */}
@@ -2632,6 +3162,140 @@ function App() {
           </div>
         </div>
       </div>
+
+      {/* =====================================================
+          ROOM / QR MODAL
+      ===================================================== */}
+
+      {showRoomModal && onlineRoomId && (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            background:
+              "rgba(0,0,0,0.35)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            zIndex: 1000,
+          }}
+        >
+          <div
+            style={{
+              background: "#ffffff",
+              borderRadius: 14,
+              padding: 28,
+              boxShadow:
+                "0 20px 50px rgba(0,0,0,0.25)",
+              minWidth: 320,
+              textAlign: "center",
+            }}
+          >
+            <div
+              style={{
+                fontSize: 20,
+                fontWeight: 700,
+                marginBottom: 6,
+              }}
+            >
+              Invite a Friend
+            </div>
+
+            <div
+              style={{
+                fontSize: 13,
+                color: "#6b7280",
+                marginBottom: 18,
+              }}
+            >
+              {onlineConnection ===
+              "connected"
+                ? "Opponent connected!"
+                : "Scan this QR code or share the link. You play White."}
+            </div>
+
+            <div
+              style={{
+                display: "flex",
+                justifyContent:
+                  "center",
+                marginBottom: 18,
+              }}
+            >
+              <QRCodeSVG
+                value={
+                  window.location.href
+                }
+                size={200}
+              />
+            </div>
+
+            <div
+              style={{
+                fontSize: 13,
+                color: "#374151",
+                wordBreak: "break-all",
+                background: "#f3f4f6",
+                borderRadius: 8,
+                padding: "8px 12px",
+                marginBottom: 16,
+              }}
+            >
+              {window.location.href}
+            </div>
+
+            <div
+              style={{
+                display: "flex",
+                gap: 10,
+              }}
+            >
+              <button
+                onClick={() => {
+                  navigator.clipboard
+                    .writeText(
+                      window.location
+                        .href
+                    )
+                    .catch(() => {});
+                }}
+                style={{
+                  flex: 1,
+                  padding: "10px 16px",
+                  borderRadius: 8,
+                  border:
+                    "1px solid #2563eb",
+                  background: "#2563eb",
+                  color: "white",
+                  cursor: "pointer",
+                  fontWeight: 600,
+                }}
+              >
+                Copy Link
+              </button>
+
+              <button
+                onClick={() =>
+                  setShowRoomModal(false)
+                }
+                style={{
+                  flex: 1,
+                  padding: "10px 16px",
+                  borderRadius: 8,
+                  border:
+                    "1px solid #d1d5db",
+                  background: "white",
+                  color: "#111827",
+                  cursor: "pointer",
+                  fontWeight: 600,
+                }}
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* =====================================================
           PROMOTION MODAL

@@ -1,9 +1,11 @@
 import os
+import random
+import string
 
 import chess
 import chess.engine
 
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -493,3 +495,135 @@ def undo_move(request: MoveRequest):
         "game_over": board.is_game_over(),
         "result": board.result()
     }
+
+
+# ---------------------------------------------------------------
+# ONLINE MULTIPLAYER (QR-JOIN ROOMS)
+# ---------------------------------------------------------------
+
+rooms = {}
+
+
+def generate_room_id():
+    alphabet = string.ascii_uppercase + string.digits
+    return "".join(random.choices(alphabet, k=6))
+
+
+@app.post("/room/new")
+def new_room():
+    room_id = generate_room_id()
+
+    while room_id in rooms:
+        room_id = generate_room_id()
+
+    board = chess.Board()
+
+    rooms[room_id] = {
+        "board": board,
+        "white": None,
+        "black": None,
+    }
+
+    return {
+        "room_id": room_id
+    }
+
+
+async def broadcast_to_room(room, message):
+    for socket in (room.get("white"), room.get("black")):
+        if socket is not None:
+            try:
+                await socket.send_json(message)
+            except Exception:
+                pass
+
+
+async def broadcast_room_status(room):
+    await broadcast_to_room(room, {
+        "type": "status",
+        "white_connected": room.get("white") is not None,
+        "black_connected": room.get("black") is not None,
+    })
+
+
+@app.websocket("/ws/room/{room_id}")
+async def room_websocket(websocket: WebSocket, room_id: str):
+    if room_id not in rooms:
+        await websocket.close(code=4404)
+        return
+
+    room = rooms[room_id]
+
+    if room["white"] is not None and room["black"] is not None:
+        await websocket.close(code=4403)
+        return
+
+    await websocket.accept()
+
+    if room["white"] is None:
+        color = "white"
+        room["white"] = websocket
+    else:
+        color = "black"
+        room["black"] = websocket
+
+    await websocket.send_json({
+        "type": "joined",
+        "color": color,
+        "fen": room["board"].fen(),
+    })
+
+    await broadcast_room_status(room)
+
+    try:
+        while True:
+            data = await websocket.receive_json()
+
+            if data.get("type") != "move":
+                continue
+
+            board = room["board"]
+
+            turn_color = "white" if board.turn == chess.WHITE else "black"
+
+            if color != turn_color:
+                await websocket.send_json({
+                    "type": "error",
+                    "message": "It is not your turn",
+                })
+                continue
+
+            try:
+                move = board.parse_san(data.get("move", ""))
+            except ValueError:
+                await websocket.send_json({
+                    "type": "error",
+                    "message": "Invalid move",
+                })
+                continue
+
+            if move not in board.legal_moves:
+                await websocket.send_json({
+                    "type": "error",
+                    "message": "Illegal move",
+                })
+                continue
+
+            board.push(move)
+
+            await broadcast_to_room(room, {
+                "type": "move",
+                "move": data.get("move"),
+                "fen": board.fen(),
+                "game_over": board.is_game_over(),
+                "result": board.result() if board.is_game_over() else None,
+            })
+
+    except WebSocketDisconnect:
+        if room.get("white") is websocket:
+            room["white"] = None
+
+        if room.get("black") is websocket:
+            room["black"] = None
+
+        await broadcast_room_status(room)
