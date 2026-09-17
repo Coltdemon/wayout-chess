@@ -1702,7 +1702,7 @@ function App() {
                 fontSize: 32,
               }}
             >
-              AI Chess Coach
+              Wayout Chess
             </h1>
 
             <div

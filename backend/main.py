@@ -18,7 +18,7 @@ COACH_TIME_LIMIT = 0.8
 
 
 app = FastAPI(
-    title="AI Chess Coach",
+    title="Wayout Chess",
     version="1.0"
 )
 
@@ -288,7 +288,7 @@ def analyze_player_move(board_before, board_after, player_move):
 @app.get("/")
 def home():
     return {
-        "message": "AI Chess Coach backend is running!"
+        "message": "Wayout Chess backend is running!"
     }
 
 

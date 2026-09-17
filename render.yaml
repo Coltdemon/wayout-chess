@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: ai-chess-backend
+    name: wayout-chess-backend
     runtime: docker
     plan: free
     rootDir: backend
