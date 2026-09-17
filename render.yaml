@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: ai-chess-backend
+    runtime: docker
+    plan: free
+    rootDir: backend
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /
+    envVars:
+      - key: CORS_ORIGINS
+        value: "http://localhost:5174,http://127.0.0.1:5174"
